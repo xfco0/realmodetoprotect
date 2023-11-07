@@ -1,4 +1,3 @@
-
 ;此程序为MBR和加载器
 ;当前并能动态的知道操作系统哪块内存是空闲, 因此假设0x10000处是空闲的
 ;也不能动态的识别用户程序到底放在哪里,因此假设放在逻辑扇区号100的地方
@@ -97,7 +96,7 @@ SECTION mbr align=16 vstart=0x7c00
     ;ds 相当指向加载首地址: 0x1000
     ;把用户程序内的原文件内段地址修改成实际内存段地址
     .read_done:
-        mov cx, [ds:0x1c]               ;获取重定位表数量
+        mov cx, [ds:0x1e]               ;获取重定位表数量
         mov bx, 0x0a               ;获取重定位表起始地址
 
         ;循环重定位, 替换成实际内存段地址
@@ -129,8 +128,8 @@ SECTION mbr align=16 vstart=0x7c00
     push word exit
 
     ;把当前栈写入用户程序,用于切换栈,返回
-    mov word [ds:0x1e],sp
-    mov word [ds:0x20],ss
+    mov word [ds:0x20],sp
+    mov word [ds:0x22],ss
     
         
     ;跳转到用户程序
