@@ -1,4 +1,3 @@
-
 ;当前是用户程序
 ;建立一个头部
 ;头部内的各种信息都是加载器需要的
@@ -30,18 +29,18 @@ SECTION user_header align=16 vstart=0
     ;再次强调, 重定位的目的是为了在程序运行中能访问这些段
     realloc_table_start:
         s_user_code dd section.user_code.start    ;0x0a
-        s_user_code_2 dd section.user_code_2.start ;0x0c
-        s_user_data dd section.user_data.start      ;0x10
-        s_user_stack dd section.user_stack.start    ;0x14
-        s_user_header dd section.user_header.start  ;0x18
+        s_user_code_2 dd section.user_code_2.start ;0x0e
+        s_user_data dd section.user_data.start      ;0x12
+        s_user_stack dd section.user_stack.start    ;0x16
+        s_user_header dd section.user_header.start  ;0x1a
     realloc_table_end:
 
     ;重定位表项数量
     ;每个重定位的段占用4个字节
-    realloc_table_len dw (realloc_table_end - realloc_table_start ) / 4 ;0x1c
+    realloc_table_len dw (realloc_table_end - realloc_table_start ) / 4 ;0x1e
 
     ;保存加载器的stack , 偏移(sp) : 段地址(ss)
-    mbr_stack dw 0,0                                ;0x1e,0x20
+    mbr_stack dw 0,0                                ;0x20,0x22
 
 user_header_end:
 
@@ -55,9 +54,6 @@ SECTION user_code align=16 vstart=0
     ;自己的栈, 数据段都在头部段中, 已经由加载器修改完成了
 
     ;注意, 当前ds指向的是自己的头部段, 也就是0x1000
-    mov ax,[ds:s_user_data]     ;自己的数据段
-    mov ds,ax
-
     mov ax,[ds:s_user_stack]    ;自己的栈
     mov ss,ax
     mov sp,user_stack_top       ;栈顶
@@ -65,11 +61,18 @@ SECTION user_code align=16 vstart=0
     mov ax, [ds:s_user_header]  ;自己头部
     mov es,ax
 
+    
+    mov ax,[ds:s_user_data]     ;自己的数据段
+    mov ds,ax
+
+    
+
     ;显示自己数据段的一条信息
     push ds
     push data_msg
     call show_msg
     add sp,4
+
 
     ;段间跳转: jmp user_code_2 : start_2
     ;利用retf , 相当于 pop ip , pop cs
@@ -141,6 +144,7 @@ SECTION user_code_2 align=16 vstart=0
         retf                            ;pop ip , pop cs
 
 user_code_2_end:
+
 
 ;数据段
 SECTION user_data align=16 vstart=0
