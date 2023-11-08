@@ -1,5 +1,5 @@
 ;用户中断程序
-;默认加载器为之前的mbr_loader.asm
+;默认加载器为之前的mbr_loader.asm, 本程序还是被默认加载到0x10000, 扇区号100
 
 ;重写 int 9 中断程序
 ;原 int 9 中断用于接受键盘字符并产生对应的acsii码,存入键盘缓冲区
@@ -32,6 +32,9 @@
 ;模拟顺序 : pushf , 把TF IF置0 , push cs ,push ip 
 ;把这些步骤简化 : pushf , tf if =0 , call far [原段地址:原偏移]
 ;------------------------------------------
+
+;此程序被加载到的逻辑段地址
+USER_APP_LOADED_SECTION_ADDR EQU 0x1000
 
 ;用户头
 ;具体注释在user_app.asm 中已经写了,这边省略
@@ -231,8 +234,19 @@ section user_code_interrupt vstart=0 align=16
     ;push ax
     ;popf
 
-    ;调用原int 9 , 这里注意ds必须是自己的数据段
-    call far [ds:int9_addr]
+    ;检查es是否还指向自己的头部段, 需要通过es:s_user_data 获取自己的数据段, 原int 9的地址放在这里
+    mov ax,es
+    cmp ax,USER_APP_LOADED_SECTION_ADDR
+    je .get_user_data
+    mov ax,USER_APP_LOADED_SECTION_ADDR
+    mov es,ax
+
+    .get_user_data:
+        mov ax,[es:s_user_data]
+        mov es,ax               ; es 指向自己的数据段
+
+    ;调用原int 9
+    call far [es:int9_addr]
 
     ;是否是esc键
     cmp bl,0x01
