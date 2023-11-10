@@ -1,0 +1,231 @@
+;进入保护模式2
+;任何一个段描述符都规定了其界限, 界限本身是一个数量单位, 需根据G位(粒度)来确定其范围
+;段界限的计算方式: ( 段界限 + 1 ) * 粒度(1 或者 4k) -1  => 实际段界限
+;最后还要加上段基址 : 段基址 + 实际段界限 => 段最大偏移
+;代码段和数据段的方向向上扩展. 因此 段基址 + eip <= 段最大偏移 
+
+;栈段往下扩展,栈顶不设限最大可以是0xffffffff
+;因此栈的最高地址可以是 : 栈基址 + 0xffffffff
+;栈的段界限用于限制最小偏移, 实际段界限: (段界限+1)*粒度(1或4k)-1+1 => 实际段界限
+;最终:段基址+实际段界限=> 段最小偏移
+;合法范围: 段最小偏移 <= (段基址 + esp - 2或4字节) <= 0xffffffff
+
+
+
+
+
+
+MBR_START_ADDR EQU 0x7c00
+
+section mbr vstart=0
+
+    ;在实模式中, 32位CPU上也可以直接使用32位寄存器
+    ;下面的代码基本跟前面的没区别, 除了使用32位寄存器
+    mov eax,[cs:GDT_BASE + MBR_START_ADDR]
+    mov ebx, 16
+    xor edx,edx
+    div ebx
+
+    mov ds, eax     ;段地址
+    mov ebx,edx     ;偏移地址
+
+    ;创建0号描述符
+    mov dword [ds:ebx],0
+    mov dword [ds:ebx + 0x04],0
+
+    ;1号描述符
+    ;数据段
+    ;段地址: 0x0, 段界限(数量):0xfffff, g=1(以4K为单位),type:0010 数据段
+    ;实际段界限:(0xfffff+1)*4k-1 = 4G. 此数据段可以覆盖整个4G空间
+    mov dword [ds:ebx + 0x08],0x0000ffff
+    mov dword [ds:ebx + 0x0c],0x00cf9200
+
+    ;2号描述符
+    ;建立代码段
+    ;段地址:0x7c00, 界限:0x01ff, g=0(以字节为单位)
+    ;实际界限:(0x1ff + 1)*1-1 = 0x01ff 共512字节
+    ;段属性D=1, 使用32位操作数
+    ;该段指向当前引导程序, 即包含16位的代码也包含下面的32位代码
+    mov dword [ds:ebx + 0x10],0x7c0001ff
+    mov dword [ds:ebx + 0x14],0x00409800
+
+    ;3号描述符
+    ;数据段,此数据段对应上面的代码段描述符只修改TYPE
+    ;段地址:0x7c00, 段界限:0x01ff,g=0,D=1
+
+    ;这个段描述符的作用是可以动态的修改代码段中的代码
+    ;由于无法通过代码段描述符写入数据, 因此可以创建一个对应的数据段描述符,例如调试器通过添加int3(0xCC)来断点
+    mov dword [ds:ebx + 0x18],0x7c0001ff
+    mov dword [ds:ebx + 0x1c],0x00409200    ;属性这里只修改了TYPE
+
+    ;4号描述符
+    ;栈段描述符
+    ;栈段基地址: 0x7c00, 段界限:0xffffe, G=1,TYPE=0110
+    ;实际段界限: (0xffffe+1)*4k-1 + 1 = 0xFFFFF000
+    ;最终最低地址 : 段基址 + 实际段界限 = 0x7c00 + 0xFFFFF000 = 0x100006C00 最高位1被舍去 => 0x6c00
+    ;最高地址: 由于esp最大可以为0XFFFF_FFFF,因此 段基址 + 0xffffffff = 0x100007BFF , 最高位舍去=>0x7bff
+    ;因此栈段空间: 0x7bff - 0x6c00 = 4k
+        ;每当push 2字节/4字节时
+        ;都将检查:1. esp = push - (2或4)  
+                 ;2. 段基址 + esp >= 段基址 + 实际段界限
+                 ;3. 如果越界则有异常
+        
+    mov dword [ds:ebx + 0x20],0x7c00fffe
+    mov dword [ds:ebx + 0x24],0x00cf9600
+
+    ;设置GDTR
+    mov word [cs:GDT_SIZE + MBR_START_ADDR],39  ;5*8-1
+    lgdt [cs:GDT_SIZE + MBR_START_ADDR]
+
+    ;打开A20(21号地址线)
+    in al,0x92
+    or al,0x02 ; 0010
+    out 0x92,al
+
+    ;屏蔽中断
+    cli
+
+    ;设置CR0的 PE位(最后1位)
+    mov eax, cr0
+    or eax,1
+    mov cr0,eax
+    ;-----当前正处于16位保护模式中----------------
+
+    ;跳转进32位保护模式
+    ;由于当前还处于16位保护模式,想进入32位,需要加载 段描述符并且其描述符的D位=1
+    ;既然要加载段描述符,意味着需要修改段寄存器的值,在保护模式中需要使用段选择子(0x0010)
+    ;dword 使用4字节修饰标号into_protect_mode 
+    jmp dword 0x0010:into_protect_mode
+
+
+
+;bits 32 以32位来编译以下代码
+[bits 32]
+
+    into_protect_mode:
+
+    ;栈段
+    ;每当push 2/4 字节 会检查时候越界: 段基址 + esp >= 段基址 + 实际段界限
+    mov eax,0x0020  ;栈段选择子
+    mov ss,eax      ;设置栈段
+    xor esp,esp     ;esp=0, push 4字节后, esp = 0xffff_fffc, 实际地址: 段基址 + esp = 0x7c00 + 0xfffffffc
+
+    mov eax,0x08        ;1号描述符,指向4G
+    mov es,eax          
+
+    ;通过1号描述符 在显存里输出字符
+    mov byte [es:0xb8000],'f'
+    mov byte [es:0xb8002],'u'
+    mov byte [es:0xb8004],'c'
+    mov byte [es:0xb8006],'k'
+
+    ;通过1号描述符, 修改当前代码段里的数据
+    ;把前4个字节和后4个字节交换
+    mov eax,[es:MSG+ MBR_START_ADDR]
+    mov ebx,[es:MSG+ MBR_START_ADDR + 4]
+    xchg eax, ebx                               ;xchg 交换
+    mov dword [es:MSG+MBR_START_ADDR] , eax
+    mov dword [es:MSG + MBR_START_ADDR + 4], ebx
+
+    ;输出代码段中的字符串
+    mov edx,0xb8008 ;从这开始输出
+
+    ;由于代码段的type:1000 , 不可读 . 但数据又在代码段中, 此时可用3号描述符的数据段
+    ;3号描述符的段基址和段界限与 代码段一致
+    mov eax,0x0018  ;3号描述符的段选择子
+    mov ds,eax
+
+    ;参数入栈,默认4字节
+    push dword [ds:MSG_SZIE]    ;长度
+    push es     ;目标段选择子
+    push edx    ;目标偏移
+    push ds     ;原段选择子
+    push MSG    ;原偏移
+    ;调用显示
+    call .show_msg
+    ;add esp, 20  这个不需要了, 在.show_msg中的ret 20 意味着: esp+20
+    cmp esp,0
+    jne .done       ;检查栈顶是否还原
+
+    ;使用3号描述继续修改MSG处的数据
+    mov eax,[ds:MSG] 
+    xchg ah,al
+    mov dword [ds:MSG], eax
+
+    mov eax,dword [ds:MSG_SZIE] ;8
+    add eax,eax                 ;16
+    add edx,eax  ;目标偏移往后增加
+
+    ;调用显示
+    push dword [ds:MSG_SZIE]
+    push es     
+    push edx    
+    push ds     
+    push MSG    
+    call .show_msg
+
+
+    .done:
+        hlt
+
+
+
+    
+
+
+;参数: 原偏移,原段选择子 ,目标偏移,目标段选择子,字符串长度
+;这里由于0xb8000(显存并没有建立段描述符),因此0xb8000作为固定目标偏移来使用, 目标段选择子也固定是1号描述符
+;ret 20 ; 20 指的是 参数字节数 * 个数 => 4 * 5 = 20
+.show_msg:
+    push ebp
+    mov ebp , esp
+    push es
+    push ds
+    push esi
+    push edi
+    push eax
+    push ecx
+
+    mov edi,[ebp + 16]  ;目标偏移
+    mov eax,[ebp + 20]  ;目标段选择子
+    mov es,eax
+
+    mov eax,[ebp + 12]   ;原段选择子
+    mov ds,eax
+    mov esi,[ebp + 8]   ;原偏移
+
+    mov ecx,[ebp + 24]  ;字符串长度
+
+    .show_loop:
+        mov al,[ds:esi]
+        mov byte [es:edi],al
+        mov byte [es:edi+1], 0x07
+        add edi,2
+        inc esi
+        loop .show_loop
+    
+
+
+    pop ecx
+    pop eax
+    pop edi
+    pop esi
+    pop ds
+    pop es
+
+    mov esp,ebp
+    pop ebp
+    ret 20
+
+
+
+;字符串长度
+MSG_SZIE dd GDT_SIZE - MSG   
+;将被修改的数据
+MSG db 'fuckme!!'
+
+GDT_SIZE dw 0
+GDT_BASE dd 0x7e00      ;实际物理地址 
+
+times 510-($-$$) db 0 
+db 0x55,0xaa
