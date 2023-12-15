@@ -127,10 +127,14 @@
 ;把每一个TCB连接在一起,形成链表;
 ;TCB结构:
 ;0x00: 下一个TCB地址
-;0x04:状态 ; 0x06:程序基址
-;0x0a:LDT 界限 ; 0x0c:LDT基址
+;0x04:状态
+;0x06:程序基址
+;0x0a:LDT 界限 
+;0x0c:LDT基址
 ;0x10:LDT 选择子
-;0x12:TSS界限,0x14:TSS基址,0x18:TSS 选择子
+;0x12:TSS界限
+;0x14:TSS基址
+;0x18:TSS 选择子
 ;0x44:用户头部段选择子
 
 ;0x1A:特权0 栈长度,以4K为单位; 通过这个数可以用 : 0xfffff - 此长度 => 栈段的界限
@@ -385,10 +389,7 @@ section code vstart=0 align=16
     mov es,ebx
     mov ebx,[ds:tcb_header] ;TCB地址
 
-    ;一旦加载完成, 此局部描述符表立马生效. 可访问LDT中的任何描述符了
-    lldt [es:ebx + 0x10]    ;加载LDT段选择子. 对应LDTR寄存器
-
-    ;加载TSS到TR, 确定任务
+    ;加载用户TSS到TR
     ltr [es:ebx + 0x18]     ;加载tss    . 对应TR寄存器
 
     ; 手动切换到TSS中的特权栈0 , 从TCB中比较容易获取, 反正都是同一个
@@ -404,7 +405,11 @@ section code vstart=0 align=16
     ; 特权3的段选择子, 都在用户头部段中
 
     mov eax, [es:ebx + 0x44]    ;获取用户头部段选择子
+    ;为用户程序的所有段寄存器初始化
     mov ds, eax                 ;切换到用户头部段去获取
+    mov es,eax
+    mov fs,eax
+    mov gs,eax
 
     ;模拟特权级改变的远返回, 注意push的顺序
     push dword [ds:0x38]         ;用户ss
@@ -736,14 +741,6 @@ load_app:
     ;------------------
 
 
-    ;用户程序符号表处理
-    ;之前把 偏移地址, 段选择子 填充到用户地址表中, 现在将把已创建的调用门选择子填充进去
-
-    push dword SEL_4G_DATA      ;段选择子
-    push esi                    ;TCB地址
-    call SEL_FUNC:realloc_user_app_symbol_table
-
-
     ;为用户程序创建额外的栈,
     push dword SEL_4G_DATA  ;段选择子
     push esi                ;TCB地址
@@ -754,18 +751,33 @@ load_app:
     ;接下来需要让CPU认识LDT,就需要把LDT存放在GDT中
     ;GDT全局唯一,LDT每个任务一个
     ;为LDT创建描述符
+    push dword SEL_4G_DATA  ;段选择子
+    push esi                ;TCB地址
     call SEL_FUNC:create_LDT_descriptor
+
+    ;一旦加载完成, 此局部描述符表立马生效. 可访问LDT中的任何描述符了
+    lldt [es:esi + 0x10]    ;加载LDT段选择子. 对应LDTR寄存器
+
 
     ;到这里
     ;1.用户程序读取完毕
     ;2.TCB任务控制块创建完,LDT创建完
     ;3.为用户程序建立描述符,并存放在LDT中
     ;4.为用户程序建立特权栈,特权栈的描述符存放在LDT中,特权栈的基本信息填充在TCB中
-    ;5.为用户程序匹配符号表,并把门调用选择子填充到用户地址表中
-    ;6.LDT界限确认(也就是为用户程序创建完所有需要的描述符)完毕后,为LDT建立系统段描述符,存放在GDT中
+    ;5.LDT界限确认(也就是为用户程序创建完所有需要的描述符)完毕后,为LDT建立系统段描述符,存放在GDT中
 
     ;接下来需要创建TSS(任务状态段)
+    push dword SEL_4G_DATA  ;段选择子
+    push esi                ;TCB地址
     call SEL_FUNC:create_tss
+
+    ;用户程序符号表处理
+    ;之前把 偏移地址, 段选择子 填充到用户地址表中, 现在将把已创建的调用门选择子填充进去
+
+    push dword SEL_4G_DATA      ;段选择子
+    push esi                    ;TCB地址
+    call SEL_FUNC:realloc_user_app_symbol_table
+
 
     pop ds
     pop es
@@ -869,7 +881,7 @@ create_tss:
 
 ;为LDT创建描述符,存放在GDT中
 ;参数: TCB地址, 段选择子
-;栈中位置: 8     12
+;栈中位置: 12     16
 ;返回: eax (ax有效位) , LDT的段选择子
 create_LDT_descriptor:
     push ebp
@@ -880,9 +892,9 @@ create_LDT_descriptor:
     push eax
     push ecx
 
-    mov ebx,[ebp + 12]  ;段选择子
+    mov ebx,[ebp + 16]  ;段选择子
     mov es,ebx
-    mov ebx , [ebp + 8] ;TCB地址
+    mov ebx , [ebp + 12] ;TCB地址
 
     ;TCB中有LDT的基址,界限
     mov edx,[es:ebx + 0x0c] ;LDT基址
@@ -910,7 +922,7 @@ create_LDT_descriptor:
     mov esp,ebp
     pop ebp
 
-    ret 8
+    retf 8
 
 
 ; 为用户程序创建额外的栈
@@ -929,9 +941,9 @@ create_extra_stack_for_cpl:
     mov ecx,[ebp + 12]      ;特权级别,也是需要循环的次数
 
     ;检查特权级别是否 > 3, < 1 则不做处理
-    test ecx,3
+    cmp ecx,3
     jg .create_extra_stack_for_cpl_done
-    test ecx,1
+    cmp ecx,1
     jl .create_extra_stack_for_cpl_done
 
 
@@ -1041,7 +1053,7 @@ compare_string:
     retf 20
 
 ;符号表字符串比较
-;参数:用户信息表地址偏移,用户可用的段选择子,    原信息表偏移,  原信息表段选择子 
+;参数:用户信息表地址偏移,用户头部段选择子,    原信息表偏移,  原信息表段选择子 
 ;栈中的位置:8                   12                16        20
 ;返回:eax , 0:不相等, 1:相等
 symbol_table_item_compare_string:
@@ -1093,7 +1105,7 @@ symbol_table_item_compare_string:
     ret 16
 
 ;比较用户符号信息表
-;参数:用户地址表起始地址, 用户信息表地址,4G段选择子
+;参数:用户地址表起始地址, 用户信息表地址,用户头部段选择子
 ;栈中位置: 8                12              16             
 ;拿用户信息表的一条与当前可以导出的信息表全部项进行比较
 symbol_table_item_compare_and_fill:
@@ -1104,7 +1116,7 @@ symbol_table_item_compare_and_fill:
     push es
     push ds
 
-    mov eax,[ebp + 16]      ;段选择子
+    mov eax,[ebp + 16]      ;头部段选择子
     mov es,eax             
 
     mov edi,[ebp + 12]      ;用户信息表地址
@@ -1118,7 +1130,7 @@ symbol_table_item_compare_and_fill:
     .begin_comapre_string:
         push ds           ;原信息表段选择子
         push esi                ;原信息表偏移地址
-        push es           ;4g段选择子
+        push es           ;头部段选择子
         push edi                 ;用户信息表偏移(首)地址
         call symbol_table_item_compare_string
         or eax,eax
@@ -1132,7 +1144,7 @@ symbol_table_item_compare_and_fill:
 .matched:
     push ds       ;原段选择子
     push esi      ;原信息表偏移地址
-    push es       ;4G选择子
+    push es       ;头部选择子
     push edi      ;用户信息表偏移地址
     push dword [ebp + 8]   ;用户地址表
     call symbol_table_item_fill_addr    ;填充地址
@@ -1149,8 +1161,8 @@ symbol_table_item_compare_and_fill:
     ret 12
 
 ;填充地址
-;参数:用户地址表,用户信息表地址,用户可用的段选择子(4G), 原信息表地址, 原段选择子
-;栈中位置: 8            12              16          20          24
+;参数:用户地址表,用户信息表地址,用户头部段段选择子, 原信息表地址, 原段选择子
+;栈中位置: 8            12          16               20          24
 symbol_table_item_fill_addr:
     push ebp
     mov ebp , esp
@@ -1222,6 +1234,8 @@ realloc_user_app_symbol_table:
     mov es,ebx
     mov eax,[ebp + 12]  ;TCB地址
     mov ebx,[es:eax + 0x06] ;用户程序起始地址
+
+    mov edx, [es:eax + 0x44] ; 用户头部段选择子
     
 
     ;比较过程:
@@ -1235,11 +1249,9 @@ realloc_user_app_symbol_table:
 
     mov edi,[es:ebx + 0x44] ;   用户符号地址表起始地址
 
-    add esi,ebx             ;加上用户起始地址偏移
-    add edi,ebx
 
     .compare_start:
-        push es             ;段选择子
+        push edx             ;头部段选择子
         push esi            ;用户符号信息表首项地址
         push edi            ;用户符号地址表起始地址
         call symbol_table_item_compare_and_fill
